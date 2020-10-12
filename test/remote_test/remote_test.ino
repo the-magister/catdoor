@@ -5,14 +5,13 @@
 #include <ESP8266WiFi.h>
 #include "Adafruit_MQTT.h"
 #include "Adafruit_MQTT_Client.h"
+#include <ESP_EEPROM.h>
 
 #define WLAN_SSID       "Looney"
 #define WLAN_PASS       "TinyandTooney"
 
-#define AIO_SERVER      "io.adafruit.com"
-#define AIO_SERVERPORT  1883                   // use 8883 for SSL
-#define AIO_USERNAME  "magister"
-#define AIO_KEY       "aio_pPTq93Pfx3NXjHEqnqzwOX9KF7WA"
+#define MQTT_SERVER      "broker.hivemq.com"
+#define MQTT_SERVERPORT  1883
 
 unsigned long openForDuration = 10UL * 1000UL;
 unsigned long openMotionDuration = 20UL * 1000UL;
@@ -20,7 +19,7 @@ unsigned long openMotionDuration = 20UL * 1000UL;
 #define PIN_PIR D3
 #define PIN_RELAY D1
 
-Bounce motion = Bounce( PIN_PIR, 5 );
+Bounce motion = Bounce( PIN_PIR, 1 );
 
 void closeDoor();
 void openMotion();
@@ -38,13 +37,18 @@ State openThenInOnly = State(openDoor, openFor, goToInOnly);
 FSM sM = FSM(inOnly); //initialize state machine
 
 WiFiClient client;
-Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+Adafruit_MQTT_Client mqtt(&client, MQTT_SERVER, MQTT_SERVERPORT);
 
-Adafruit_MQTT_Publish pubMotion = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/catdoor.motion");
-Adafruit_MQTT_Publish pubDoor = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/catdoor.door");
-Adafruit_MQTT_Subscribe subMode = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/catdoor.mode");
+Adafruit_MQTT_Publish pubMotion = Adafruit_MQTT_Publish(&mqtt, "magister/catdoor/motion");
+Adafruit_MQTT_Publish pubDoor = Adafruit_MQTT_Publish(&mqtt, "magister/catdoor/door");
+
+Adafruit_MQTT_Subscribe subMode = Adafruit_MQTT_Subscribe(&mqtt, "magister/catdoor/mode");
+Adafruit_MQTT_Subscribe subForDur = Adafruit_MQTT_Subscribe(&mqtt, "magister/catdoor/doorDur");
+Adafruit_MQTT_Subscribe subMotionDur = Adafruit_MQTT_Subscribe(&mqtt, "magister/catdoor/motionDur");
 
 void MQTT_connect();
+
+const int EEPROM_start = 0;
 
 void setup() {
   pinMode(PIN_PIR, INPUT);
@@ -59,6 +63,35 @@ void setup() {
   Serial << "Connecting to: " << WLAN_SSID << endl;
 
   WiFi.begin(WLAN_SSID, WLAN_PASS);
+
+  Serial.println("Initializing EEPROM...");
+
+  EEPROM.begin(512);
+  EEPROM.get(0, openForDuration);
+  EEPROM.get(sizeof(openForDuration), openMotionDuration);
+  String mode;
+  EEPROM.get(sizeof(openForDuration) + sizeof(openMotionDuration), mode);
+  Serial << "openForDur = " << openForDuration << endl;
+  Serial << "openMotionDur = " << openMotionDuration << endl;
+  Serial << "mode = " << mode << endl;
+
+  if ( mode.equals("closed") ) {
+    sM.transitionTo(closed);
+  } else if ( mode.equals("inOnly") ) {
+    sM.transitionTo(inOnly);
+  } else if ( mode.equals("open") ) {
+    sM.transitionTo(open);
+  } else if ( mode.equals("openForThenClosed") ) {
+    sM.transitionTo(openThenClosed);
+  } else if ( mode.equals("openForThenInOnly") ) {
+    sM.transitionTo(openThenInOnly);
+  }
+
+  // Setup MQTT subscription for instructions.
+  mqtt.subscribe(&subMode);
+  mqtt.subscribe(&subForDur);
+  mqtt.subscribe(&subMotionDur);
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -68,30 +101,64 @@ void setup() {
   Serial.println("WiFi connected");
   Serial.println("IP address: "); Serial.println(WiFi.localIP());
 
-  // Setup MQTT subscription for onoff feed.
-  mqtt.subscribe(&subMode);
-
   Serial << "Setup. complete." << endl;
 }
 
-
-void loop() {
-  MQTT_connect();
-
-  sM.update();
+void msgUpdates() {
 
   Adafruit_MQTT_Subscribe *subscription;
-  while ((subscription = mqtt.readSubscription(5000))) {
+  while ((subscription = mqtt.readSubscription(1000))) {
     if (subscription == &subMode) {
-      Serial.print(F("Got: "));
-      Serial.println((char *)subMode.lastread);
+      String msg = (char *)subMode.lastread;
+      Serial << "msgUpdates. mode: " << msg << endl;
+      if ( msg.equals("closed") ) {
+        sM.transitionTo(closed);
+      } else if ( msg.equals("inOnly") ) {
+        sM.transitionTo(inOnly);
+      } else if ( msg.equals("open") ) {
+        sM.transitionTo(open);
+      } else if ( msg.equals("openForThenClosed") ) {
+        sM.transitionTo(openThenClosed);
+      } else if ( msg.equals("openForThenInOnly") ) {
+        sM.transitionTo(openThenInOnly);
+      }
+      EEPROM.put(sizeof(openForDuration) + sizeof(openMotionDuration), msg);
+      EEPROM.commit();
+    }
+
+    if (subscription == &subForDur) {
+      String msg = (char *)subForDur.lastread;
+      unsigned long dur = msg.toInt();
+      openForDuration = dur * 60UL * 60UL * 1000UL; // h -> ms
+      EEPROM.put(0, openForDuration);
+      EEPROM.commit();
+      Serial << "doorUpdate. forDuration: " << dur << " hr (" << openForDuration << " ms)" << endl;
+    }
+
+    if (subscription == &subMotionDur) {
+      String msg = (char *)subMotionDur.lastread;
+      unsigned long dur = msg.toInt();
+      openMotionDuration = dur * 1000UL; // sec -> ms
+      EEPROM.put(sizeof(openForDuration), openMotionDuration);
+      EEPROM.commit();
+      Serial << "doorUpdate. motionDur: " << dur << " sec (" << openMotionDuration << " ms)" << endl;
     }
   }
 
-  if (! mqtt.ping()) {
-    mqtt.disconnect();
-  }
+}
 
+void loop() {
+  MQTT_connect();
+  yield();
+  
+  msgUpdates();
+  yield();
+
+  sM.update();
+  yield();
+
+  static Metro keepAlive(30UL * 1000UL);
+  if ( keepAlive.check() && !mqtt.ping() ) mqtt.disconnect();
 }
 
 // Function to connect and reconnect as necessary to the MQTT server.
@@ -124,7 +191,7 @@ void MQTT_connect() {
 void closeDoor() {
   digitalWrite(PIN_RELAY, LOW);
   Serial << "shutting door." << endl;
-  
+
   if (! pubDoor.publish(0) )  Serial << "MQTT Failed!" << endl;
 }
 
