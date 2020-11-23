@@ -15,9 +15,13 @@
 #define MQTT_SERVER      "broker.hivemq.com"
 #define MQTT_SERVERPORT  1883
 
-#define PIN_PIR D3
-#define PIN_RELAY D1
+// D4 is builtin LED
+#define PIN_LED D4
+#define PIN_MOTOR D1
+#define PIN_DOOR D6
+#define PIN_PIR D2
 
+Bounce door = Bounce( PIN_DOOR, 1 );
 Bounce motion = Bounce( PIN_PIR, 1 );
 
 struct State_t {
@@ -78,20 +82,24 @@ NTPClient timeClient(ntpUDP);
 void setup() {
   delay(1000);
 
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_MOTOR, OUTPUT);
+  pinMode(PIN_DOOR, INPUT_PULLUP);
   pinMode(PIN_PIR, INPUT);
-  pinMode(PIN_RELAY, OUTPUT);
-  pinMode(BUILTIN_LED, OUTPUT);
 
   Serial.begin(115200);
   Serial << endl << endl;
   Serial << "Setup. begin." << endl;
 
-  digitalWrite(BUILTIN_LED, LOW); // boot indicator
+  digitalWrite(PIN_LED, LOW); // boot indicator
 
   Serial << "Connecting to: " << WLAN_SSID << endl;
   WiFi.disconnect();
   WiFi.mode(WIFI_STA);
   WiFi.begin(WLAN_SSID, WLAN_PASS);
+
+  // start with a manual sync.
+  doorDelay(10);
 
   Serial.println("Initializing EEPROM...");
   EEPROM.begin(512);
@@ -126,7 +134,7 @@ void setup() {
     if (retries-- == 0) while (1);  // basically die and wait for WDT to reset me
     Serial.print(".");
     ledState = !ledState;
-    digitalWrite(BUILTIN_LED, ledState); // blink while waiting to connect
+    digitalWrite(PIN_LED, ledState); // blink while waiting to connect
   }
   Serial.println();
 
@@ -139,7 +147,7 @@ void setup() {
   Serial << "offset. " << offset << endl;
   timeClient.setTimeOffset(offset);
 
-  digitalWrite(BUILTIN_LED, HIGH); // all clear
+  digitalWrite(PIN_LED, HIGH); // all clear
   Serial << "Setup. complete." << endl;
 }
 
@@ -160,6 +168,9 @@ void loop() {
   yield();
 
   sendStatus();
+  yield();
+
+  doorDelay(2);
   yield();
 }
 
@@ -276,20 +287,34 @@ void goToState(byte mode) {
   }
 }
 
-void closeDoor() {
-  digitalWrite(PIN_RELAY, LOW);
-  //  digitalWrite(BUILTIN_LED, HIGH);
-  state.door = false;
-  Serial << "shutting door." << endl;
-}
+void doorDelay(uint32_t dur) {
+  Metro waitfor(dur);
+  waitfor.reset();
 
+  while ( ! waitfor.check() ) {
+    if ( door.update() ) digitalWrite(PIN_LED, door.read());
+    yield();
+  }
+}
+void pulseDoorMotor(uint32_t dur) {
+  digitalWrite(PIN_MOTOR, HIGH);    // turn the LED off by making the voltage LOW
+  doorDelay(dur);
+  digitalWrite(PIN_MOTOR, LOW);    // turn the LED off by making the voltage LOW
+  doorDelay(20);  
+}
 uint32_t lastOpen;
 void openDoor() {
-  digitalWrite(PIN_RELAY, HIGH);
-  //  digitalWrite(BUILTIN_LED, LOW);
+  pulseDoorMotor(40);
+  while ( door.read() == HIGH ) pulseDoorMotor(8);
+  
   state.door = true;
   lastOpen = timeClient.getEpochTime();
-  Serial << "opening door." << endl;
+  Serial << "door open." << endl;
+}
+void closeDoor() {
+  if( state.door == true && door.read() == LOW ) pulseDoorMotor(90);
+  state.door = false;
+  Serial << "door closed." << endl;  
 }
 
 String getDayTime() {
@@ -317,7 +342,7 @@ void updateMotion() {
   }
 
   state.motion = motion.read();
-  digitalWrite(BUILTIN_LED, !state.motion); // LED is on when LOW
+  digitalWrite(PIN_LED, !state.motion); // LED is on when LOW
 }
 
 void inOnlyUpdate() {
