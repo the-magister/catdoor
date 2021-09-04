@@ -1,5 +1,5 @@
-// ArduinoJson - arduinojson.org
-// Copyright Benoit Blanchon 2014-2020
+// ArduinoJson - https://arduinojson.org
+// Copyright Benoit Blanchon 2014-2021
 // MIT License
 
 #define ARDUINOJSON_DECODE_UNICODE 1
@@ -74,16 +74,16 @@ TEST_CASE("Invalid JSON string") {
   }
 }
 
-TEST_CASE("Not enough room to duplicate the string") {
-  DynamicJsonDocument doc(JSON_OBJECT_SIZE(0));
+TEST_CASE("Not enough room to save the key") {
+  DynamicJsonDocument doc(JSON_OBJECT_SIZE(1) + 8);
 
   SECTION("Quoted string") {
-    REQUIRE(deserializeJson(doc, "{\"example\":1}") ==
+    REQUIRE(deserializeJson(doc, "{\"accuracy\":1}") ==
             DeserializationError::NoMemory);
   }
 
   SECTION("Non-quoted string") {
-    REQUIRE(deserializeJson(doc, "{example:1}") ==
+    REQUIRE(deserializeJson(doc, "{accuracy:1}") ==
             DeserializationError::NoMemory);
   }
 }
